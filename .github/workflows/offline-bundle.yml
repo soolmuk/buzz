@@ -211,7 +211,7 @@ jobs:
           set -euo pipefail
           debs=""
           if [ "${{ matrix.arch }}" = "amd64" ]; then debs=/tmp/docker-debs; fi
-          ./offline/scripts/make-bundle.sh "${{ matrix.arch }}" "$BUNDLE" ./dist ./dist "$debs"
+          ./offline/scripts/make-bundle.sh "${{ matrix.arch }}" "$BUNDLE" ./dist ./dist/single "$debs"
 
       - name: Upload bundle assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -220,8 +220,8 @@ jobs:
           # a release does not ship the same 300 MB twice.
           name: bundle-${{ matrix.arch }}
           path: |
-            dist/buzz-offline-*.tar.gz
-            dist/buzz-offline-*.tar.gz.sha256
+            dist/single/buzz-offline-*.tar.gz
+            dist/single/buzz-offline-*.tar.gz.sha256
           retention-days: 7
           if-no-files-found: error
 
@@ -267,9 +267,10 @@ jobs:
         run: |
           set -euo pipefail
           ls -lh assets
-
-          # Merge per-arch checksum files into one file per arch-suffixed name
-          # (asset names must be unique, so they stay arch-scoped).
+          # One archive per arch; name the amd64 one explicitly (that is the
+          # documented path) and leave the rest to the asset list.
+          archive="buzz-offline-amd64-${BUNDLE#offline-}"
+          [ -f "assets/${archive}.tar.gz" ] || archive="$(basename "$(ls assets/*.tar.gz | head -1)" .tar.gz)"
 
           {
             echo "Offline Buzz relay bundle \`${BUNDLE}\`."
@@ -283,9 +284,13 @@ jobs:
             echo "Each architecture is ONE archive: the five image tarballs, the installing layer and (amd64) the Docker Engine packages it needs."
             echo "Nothing else is required and no network is touched."
             echo
+            for a in assets/*.tar.gz; do
+              echo "- \`$(basename "$a")\` — $(du -h "$a" | cut -f1)"
+            done
+            echo
             echo '```bash'
-            echo "sha256sum -c buzz-offline-amd64-${BUNDLE}.tar.gz.sha256"
-            echo "tar -xzf buzz-offline-amd64-${BUNDLE}.tar.gz && cd buzz-offline-amd64-${BUNDLE}"
+            echo "sha256sum -c ${archive}.tar.gz.sha256"
+            echo "tar -xzf ${archive}.tar.gz && cd ${archive}"
             echo "sudo docker-debs/install.sh          # only if docker is not installed yet"
             echo "cd offline && sudo ./scripts/install.sh --host <server-ip> --port 80"
             echo '```'
