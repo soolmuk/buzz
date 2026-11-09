@@ -184,6 +184,35 @@ jobs:
           cp /tmp/resolved/resolved-lock.json "$LOCK_PATH"
           ./offline/scripts/package-images.sh "${{ matrix.arch }}" "$BUNDLE" ./dist
 
+      - name: Fetch Docker Engine packages for Ubuntu 24.04
+        # Only amd64 hosts get the Docker .debs: the target is an offline
+        # Ubuntu 24.04 server, and these are the one thing it cannot get later.
+        if: matrix.arch == 'amd64'
+        env:
+          DOCKER_DEBS: >-
+            docker-ce_29.9.3-1~ubuntu.24.04~noble_amd64.deb
+            docker-ce-cli_29.9.3-1~ubuntu.24.04~noble_amd64.deb
+            containerd.io_2.4.2-3~ubuntu.24.04~noble_amd64.deb
+            docker-buildx-plugin_0.38.1-1~ubuntu.24.04~noble_amd64.deb
+            docker-compose-plugin_5.7.0-1~ubuntu.24.04~noble_amd64.deb
+        run: |
+          set -euo pipefail
+          mkdir -p /tmp/docker-debs
+          base=https://download.docker.com/linux/ubuntu/dists/noble/pool/stable/amd64
+          for f in $DOCKER_DEBS; do
+            curl -sSfL --retry 3 -o "/tmp/docker-debs/$f" "$base/$f"
+          done
+          ls -lh /tmp/docker-debs
+
+      - name: Assemble the single-file bundle
+        env:
+          BUNDLE: ${{ needs.resolve.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          debs=""
+          if [ "${{ matrix.arch }}" = "amd64" ]; then debs=/tmp/docker-debs; fi
+          ./offline/scripts/make-bundle.sh "${{ matrix.arch }}" "$BUNDLE" ./dist ./dist "$debs"
+
       - name: Upload bundle assets
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
         with:
@@ -247,11 +276,14 @@ jobs:
             echo "|---|---|---|"
             jq -r '.images[] | "| \(.name) | `\(.ref)` | `\(.digest)` |"' "$LOCK_PATH"
             echo
-            echo "Install on an air-gapped host:"
+            echo "Each architecture is ONE archive: the five image tarballs, the installing layer and (amd64) the Docker Engine packages it needs."
+            echo "Nothing else is required and no network is touched."
+            echo
             echo '```bash'
-            echo "tar -xzf buzz-offline-bundle-<arch>.tar.gz && cd offline"
-            echo "mkdir -p images && mv ../*-linux-<arch>.tar.gz ../images-*.{json,txt} ../SHA256SUMS-<arch> images/"
-            echo "./scripts/install.sh --host <server-ip> --port 80"
+            echo "sha256sum -c buzz-offline-amd64-${BUNDLE}.tar.gz.sha256"
+            echo "tar -xzf buzz-offline-amd64-${BUNDLE}.tar.gz && cd buzz-offline-amd64-${BUNDLE}"
+            echo "sudo docker-debs/install.sh          # only if docker is not installed yet"
+            echo "cd offline && sudo ./scripts/install.sh --host <server-ip> --port 80"
             echo '```'
             echo
             echo "HTTP only: no TLS, no reverse proxy. Clients use \`http://<host>\` and \`ws://<host>\`."

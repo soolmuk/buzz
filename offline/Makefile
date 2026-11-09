@@ -1,6 +1,7 @@
 # Offline Buzz relay bundle — operator entry points.
 #
 #   make bundle ARCH=arm64        build release assets locally (docker save)
+#   make single ARCH=arm64        one archive: assets + installing layer (+ debs if present)
 #   make install HOST=10.0.0.5    load images, write .env, start, verify
 #   make verify                   quick checks (HTTP, web UI, WS upgrade)
 #   make verify-deep              NIP-42 auth + publish + read-back
@@ -15,10 +16,16 @@ HOST ?= 127.0.0.1
 PORT ?= 80
 RELEASE_LOCAL ?= local-$(shell date -u +%Y%m%d-%H%M%S)
 
-.PHONY: bundle install verify verify-deep logs down status backup
+.PHONY: bundle single install verify verify-deep logs down status backup
 
 bundle:
 	./scripts/package-images.sh $(ARCH) $(RELEASE_LOCAL) ./dist
+
+# The single file an offline host needs, built from ./dist. Docker .debs are
+# bundled when DEBS points at a folder holding them.
+DEBS ?=
+single: bundle
+	./scripts/make-bundle.sh $(ARCH) "offline-$(RELEASE_LOCAL)" ./dist ./dist $(DEBS)
 
 install:
 	./scripts/install.sh --host $(HOST) --port $(PORT)

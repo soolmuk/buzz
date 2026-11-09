@@ -39,8 +39,13 @@ say() { printf '\033[1;33m==>\033[0m %s\n' "$*"; }
 die() { printf '\033[1;31merror:\033[0m %s\n' "$*" >&2; exit 1; }
 
 # ── preflight ───────────────────────────────────────────────────────────────
-command -v docker >/dev/null || die "docker is not installed"
-docker compose version >/dev/null 2>&1 || die "docker compose v2 is required"
+if ! command -v docker >/dev/null; then
+  if [ -x "$OFFLINE_DIR/../docker-debs/install.sh" ]; then
+    die "docker is not installed — this bundle carries it: sudo ../docker-debs/install.sh"
+  fi
+  die "docker is not installed — install Docker Engine + compose v2 first (the amd64 bundle ships docker-debs/install.sh for that)"
+fi
+docker compose version >/dev/null 2>&1 || die "docker compose v2 is required (the bundle's docker-debs/install.sh installs it)"
 docker info >/dev/null 2>&1 || die "cannot reach the Docker daemon (is it running? are you in the docker group?)"
 command -v openssl >/dev/null || die "openssl is required to generate secrets"
 

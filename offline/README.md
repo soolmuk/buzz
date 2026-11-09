@@ -59,18 +59,18 @@ outside the container.
 
 ## Getting a bundle
 
-**From the release** (normal path). Download the assets for the server's
-architecture from the latest `offline-*` release:
+**From the release** (normal path). Each architecture is published as **one
+archive**, so there is a single file to carry to the offline host:
 
 ```
-buzz-offline-bundle-<arch>.tar.gz   the offline/ directory (this layer)
-relay-linux-<arch>.tar.gz           ghcr.io/block/buzz (relay + web UI + admin)
-postgres-linux-<arch>.tar.gz        postgres:17-alpine
-redis-linux-<arch>.tar.gz           redis:7-alpine
-silo-linux-<arch>.tar.gz            pgsty/silo (MinIO-compatible object store)
-mc-linux-<arch>.tar.gz              pgsty/mc (bucket bootstrap)
-images-<arch>.json / .txt          image ids for the loaded bundle
-SHA256SUMS-<arch>                  checksums
+buzz-offline-amd64-<release>.tar.gz          everything below, in one file
+buzz-offline-amd64-<release>.tar.gz.sha256   its checksum
+
+  QUICKSTART.md              step-by-step install, in Korean
+  offline/                   this layer: compose, scripts, README
+  offline/images/            relay, postgres, redis, silo, mc `docker save`
+                             tarballs + images-<arch>.json/.txt + SHA256SUMS-<arch>
+  docker-debs/               (amd64 only) Docker Engine + compose .debs, install.sh
 ```
 
 **Built locally** (needs internet and Docker):
@@ -83,14 +83,17 @@ make bundle ARCH=arm64            # or ARCH=amd64, output in ./dist
 ## Install on the offline host
 
 ```bash
-tar -xzf buzz-offline-bundle-<arch>.tar.gz
-cd offline
-mkdir -p images
-mv ../*-linux-<arch>.tar.gz ../images-<arch>.json ../images-<arch>.txt \
-   ../SHA256SUMS-<arch> images/
+sha256sum -c buzz-offline-amd64-<release>.tar.gz.sha256
+tar -xzf buzz-offline-amd64-<release>.tar.gz
+cd buzz-offline-amd64-<release>
 
-./scripts/install.sh --host 166.103.175.321 --port 80
+sudo docker-debs/install.sh          # only if docker is not installed yet
+cd offline
+sudo ./scripts/install.sh --host 166.103.175.321 --port 80
 ```
+
+Nothing has to be moved around: the archive already puts the image tarballs in
+`offline/images/`, which is where `install.sh` looks.
 
 `install.sh` verifies checksums, loads the images, generates `.env` (relay key,
 HMAC secret, database/Redis/S3 credentials), starts the stack, waits for
