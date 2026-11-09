@@ -1,8 +1,8 @@
 {
   "schema": 1,
-  "bundle": "offline-2026.11.09-1400",
+  "bundle": "offline-2026.11.09-1411",
   "upstream_tag": "main",
-  "generated_at": "2026-11-09T14:03:30Z",
+  "generated_at": "2026-11-09T14:14:51Z",
   "notes": "Pinned image digests for the offline bundle. The offline-bundle workflow rewrites this file when any digest moves; packaging pulls by digest so a tag move cannot change a bundle silently.",
   "images": [
     {
