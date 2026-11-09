@@ -99,7 +99,7 @@ sudo ./scripts/install.sh --host <서버IP> --port 80
 ## 4. 확인
 
 \`\`\`bash
-./scripts/verify.sh        # 헬스/웹/웹소켓/외부 접속/인터넷 차단 검사
+sudo ./scripts/verify.sh   # 헬스/웹/웹소켓/외부 접속/인터넷 차단 검사
 \`\`\`
 
 맨 아래 \`relay reached 1.1.1.1:443\` 만 red 로 뜨면, 이 서버에 인터넷 경로가 있다는 뜻입니다.
@@ -115,9 +115,9 @@ sudo ./scripts/install.sh --host <서버IP> --port 80
 \`\`\`bash
 cd offline
 sudo ./scripts/install.sh --host <새IP> --port <새포트>   # 주소 변경 (데이터 유지)
-./scripts/backup.sh                                      # DB + git 볼륨 백업
-docker compose logs -f relay                             # 로그
-docker compose down                                      # 중지
+sudo ./scripts/backup.sh                                 # DB + git 볼륨 백업
+sudo docker compose logs -f relay                        # 로그
+sudo docker compose down                                 # 중지
 \`\`\`
 
 전체 문서: \`offline/README.md\`
