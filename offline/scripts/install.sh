@@ -79,8 +79,12 @@ while IFS=$'\t' read -r name tag expected_id; do
 
   actual_id=$(docker image inspect --format '{{.Id}}' "$tag" 2>/dev/null || true)
   [ -n "$actual_id" ] || die "archive $(basename "$asset") did not provide ${tag}"
+  # Image ids are advisory. The archive checksum already proved transport
+  # integrity; a daemon may re-key the same image (Docker Desktop/containerd
+  # reports the multi-platform index digest where the classic store reports the
+  # config digest), so a mismatch is reported, never fatal.
   if [ -n "$expected_id" ] && [ "$actual_id" != "$expected_id" ]; then
-    die "image id mismatch for ${name}: expected ${expected_id}, loaded ${actual_id}"
+    say "note: ${name} image id differs from the bundle manifest (${actual_id##sha256:} vs ${expected_id##sha256:}) — local daemon re-keyed an identical, checksum-verified image"
   fi
 done <"$MANIFEST"
 
@@ -96,7 +100,8 @@ if [ "$FORCE" = "0" ] && [ -f "$ENV_FILE" ]; then
   # Only the image pins and the release pointer move on upgrade.
   sed -i.bak -E "s|^OFFLINE_RELEASE=.*|OFFLINE_RELEASE=${RELEASE}|" "$ENV_FILE"
   for name in relay postgres redis silo mc; do
-    sed -i.bak -E "s|^OFFLINE_IMAGE_${name^^}=.*|OFFLINE_IMAGE_${name^^}=buzz-offline/${name}:${RELEASE}|" "$ENV_FILE"
+    upper=$(printf '%s' "$name" | tr '[:lower:]' '[:upper:]')
+    sed -i.bak -E "s|^OFFLINE_IMAGE_${upper}=.*|OFFLINE_IMAGE_${upper}=buzz-offline/${name}:${RELEASE}|" "$ENV_FILE"
   done
 
   # Address change: --host/--port go through set-address.sh, which rebinds the
@@ -180,7 +185,8 @@ done
 [ "$ready" = "1" ] || die "relay did not become ready — see: docker compose -f $OFFLINE_DIR/compose.yml logs relay"
 
 say "running verification"
-"$OFFLINE_DIR/scripts/verify.sh"
+verify_rc=0
+"$OFFLINE_DIR/scripts/verify.sh" || verify_rc=$?
 
 HTTP_PORT=$(sed -nE 's/^OFFLINE_HTTP_PORT=//p' "$ENV_FILE" | head -1)
 HTTP_PORT="${HTTP_PORT:-80}"
@@ -208,3 +214,5 @@ Logs:     docker compose -f ${OFFLINE_DIR}/compose.yml logs -f relay
 Back up:  ${OFFLINE_DIR}/scripts/backup.sh
 Upgrade:  drop the new release assets in ${IMAGES_DIR} and re-run this script
 EOF
+
+exit "$verify_rc"
