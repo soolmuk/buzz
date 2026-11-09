@@ -1,0 +1,278 @@
+name: Offline bundle
+
+# Builds the air-gapped Buzz relay bundle: `docker save` tarballs for the relay
+# and its dependencies, published as GitHub Release assets together with the
+# installing side (`offline/`) and checksums.
+#
+# Nothing is compiled here. The relay image comes from upstream's GHCR
+# publication, and `offline/images.lock` pins every image by digest, so this
+# layer tracks upstream updates without touching upstream source.
+#
+#   schedule        daily digest check; a release is cut only when a digest moved
+#   workflow_dispatch  manual run (force / pin a relay tag / pick arches)
+#
+# A run creates exactly one release named `offline-<UTC date>`; that name is
+# also written into offline/images.lock as `bundle`, which is what
+# install.sh prints and what an operator pins.
+
+on:
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
+    inputs:
+      upstream_tag:
+        description: "Relay image tag to track (e.g. main or 0.3.0). Empty keeps the lock's value."
+        required: false
+        default: ""
+      arches:
+        description: "Architectures to package"
+        type: choice
+        options: [amd64, arm64, both]
+        default: amd64
+      force:
+        description: "Cut a release even if no digest changed"
+        type: boolean
+        default: false
+
+permissions: {}
+
+# Serialize releases: two runs cutting overlapping bundles would race on the
+# lock file and on the release tag.
+concurrency:
+  group: offline-bundle
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: ghcr.io/block/buzz
+  LOCK_PATH: offline/images.lock
+
+jobs:
+  resolve:
+    name: Resolve image digests
+    # Skip inside the upstream repo (block/buzz) unless explicitly allowed;
+    # this workflow publishes releases in whichever repo carries the offline
+    # layer, which is a downstream fork.
+    if: github.repository_owner != 'block' || vars.OFFLINE_BUNDLE_IN_CORE == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    outputs:
+      changed: ${{ steps.diff.outputs.changed }}
+      bundle: ${{ steps.bundle.outputs.bundle }}
+      arches: ${{ steps.bundle.outputs.arches }}
+      upstream_tag: ${{ steps.bundle.outputs.upstream_tag }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@d7f5e7f509e45cec5c76c4d5afdd7de93d0b3df5  # v4.1.0
+
+      - name: Decide bundle name, upstream tag and arches
+        id: bundle
+        env:
+          INPUT_TAG: ${{ inputs.upstream_tag }}
+          INPUT_ARCHES: ${{ inputs.arches }}
+        run: |
+          set -euo pipefail
+          lock_tag=$(jq -r '.upstream_tag' "$LOCK_PATH")
+          upstream_tag="${INPUT_TAG:-$lock_tag}"
+          [ -n "$upstream_tag" ] || upstream_tag=main
+
+          case "${INPUT_ARCHES:-amd64}" in
+            amd64) arches='[{"arch":"amd64","runner":"ubuntu-24.04"}]' ;;
+            arm64) arches='[{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' ;;
+            both)  arches='[{"arch":"amd64","runner":"ubuntu-24.04"},{"arch":"arm64","runner":"ubuntu-24.04-arm"}]' ;;
+            *) echo "::error::unknown arches input"; exit 1 ;;
+          esac
+
+          bundle="offline-$(date -u +%Y.%m.%d-%H%M)"
+          echo "bundle=$bundle" >>"$GITHUB_OUTPUT"
+          echo "upstream_tag=$upstream_tag" >>"$GITHUB_OUTPUT"
+          echo "arches=$arches" >>"$GITHUB_OUTPUT"
+
+      - name: Resolve digests and refresh the lock
+        id: diff
+        env:
+          UPSTREAM_TAG: ${{ steps.bundle.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          work=$(mktemp -d)
+          cp "$LOCK_PATH" "$work/lock.json"
+
+          # The relay ref follows the requested upstream tag; the dependency
+          # refs come from the lock as-is.
+          jq --arg tag "$UPSTREAM_TAG" \
+            '.upstream_tag = $tag
+             | .images |= map(if .name == "relay"
+                 then .ref = ("ghcr.io/block/buzz:" + $tag)
+                 else . end)' "$work/lock.json" >"$work/lock.refs.json"
+
+          images=$(
+            jq -c '.images[] | {name, ref}' "$work/lock.refs.json" |
+              while IFS= read -r entry; do
+                name=$(jq -r .name <<<"$entry")
+                ref=$(jq -r .ref <<<"$entry")
+                digest=$(docker buildx imagetools inspect "$ref" --format '{{json .Manifest}}' | jq -r .digest)
+                [ -n "$digest" ] && [ "$digest" != "null" ] || { echo "::error::cannot resolve $ref"; exit 1; }
+                jq -n --arg name "$name" --arg ref "$ref" --arg digest "$digest" \
+                  '{name: $name, ref: $ref, digest: $digest}'
+              done | jq -s '.'
+          )
+
+          jq --argjson images "$images" '.images = $images' "$work/lock.refs.json" >"$work/lock.new.json"
+
+          old=$(jq -S '[.images[] | {name, digest}]' "$work/lock.json")
+          new=$(jq -S '[.images[] | {name, digest}]' "$work/lock.new.json")
+          if [ "$old" = "$new" ]; then
+            echo "changed=false" >>"$GITHUB_OUTPUT"
+            echo "No image digest moved; nothing to publish."
+          else
+            echo "changed=true" >>"$GITHUB_OUTPUT"
+            echo "Digests changed:"
+            diff <(jq -r '.images[] | "\(.name) \(.digest)"' "$work/lock.json") \
+                 <(jq -r '.images[] | "\(.name) \(.digest)"' "$work/lock.new.json") || true
+          fi
+
+          mkdir -p artifacts
+          cp "$work/lock.new.json" artifacts/resolved-lock.json
+          jq -r '.images[] | "\(.name): \(.ref) @ \(.digest)"' artifacts/resolved-lock.json
+
+      - name: Upload resolved lock
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: resolved-lock
+          path: artifacts/resolved-lock.json
+          retention-days: 7
+          if-no-files-found: error
+
+  package:
+    name: Package images (${{ matrix.arch }})
+    needs: resolve
+    if: needs.resolve.outputs.changed == 'true' || inputs.force
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.resolve.outputs.arches) }}
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: resolved-lock
+          path: /tmp/resolved
+
+      - name: Install packaging tools
+        run: |
+          set -euo pipefail
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq --no-install-recommends jq
+
+      - name: Package linux/${{ matrix.arch }}
+        env:
+          BUNDLE: ${{ needs.resolve.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          cp /tmp/resolved/resolved-lock.json "$LOCK_PATH"
+          ./offline/scripts/package-images.sh "${{ matrix.arch }}" "$BUNDLE" ./dist
+
+      - name: Upload bundle assets
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
+        with:
+          name: bundle-${{ matrix.arch }}
+          path: dist/*
+          retention-days: 7
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [resolve, package]
+    if: needs.resolve.outputs.changed == 'true' || inputs.force
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write    # create the release and commit the refreshed lock
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10  # v6.0.3
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          pattern: bundle-*
+          merge-multiple: true
+          path: assets
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c  # v8.0.1
+        with:
+          name: resolved-lock
+          path: /tmp/resolved
+
+      - name: Refresh the lock from the resolved digests
+        env:
+          BUNDLE: ${{ needs.resolve.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          jq --arg bundle "$BUNDLE" --arg now "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            '.bundle = $bundle | .generated_at = $now' \
+            /tmp/resolved/resolved-lock.json >"$LOCK_PATH"
+          cat "$LOCK_PATH"
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BUNDLE: ${{ needs.resolve.outputs.bundle }}
+          UPSTREAM_TAG: ${{ needs.resolve.outputs.upstream_tag }}
+        run: |
+          set -euo pipefail
+          ls -lh assets
+
+          # Merge per-arch checksum files into one file per arch-suffixed name
+          # (asset names must be unique, so they stay arch-scoped).
+
+          {
+            echo "Offline Buzz relay bundle \`${BUNDLE}\`."
+            echo
+            echo "Relay image tracks upstream \`ghcr.io/block/buzz:${UPSTREAM_TAG}\` at the digests below."
+            echo
+            echo "| image | ref | digest |"
+            echo "|---|---|---|"
+            jq -r '.images[] | "| \(.name) | `\(.ref)` | `\(.digest)` |"' "$LOCK_PATH"
+            echo
+            echo "Install on an air-gapped host:"
+            echo '```bash'
+            echo "tar -xzf buzz-offline-bundle-<arch>.tar.gz && cd offline"
+            echo "mkdir -p images && mv ../*-linux-<arch>.tar.gz ../images-*.{json,txt} ../SHA256SUMS-<arch> images/"
+            echo "./scripts/install.sh --host <server-ip> --port 80"
+            echo '```'
+            echo
+            echo "HTTP only: no TLS, no reverse proxy. Clients use \`http://<host>\` and \`ws://<host>\`."
+          } >/tmp/release-notes.md
+
+          gh release create "$BUNDLE" \
+            --title "Buzz offline bundle ${BUNDLE}" \
+            --notes-file /tmp/release-notes.md \
+            assets/*
+
+      - name: Commit the refreshed lock
+        env:
+          BUNDLE: ${{ needs.resolve.outputs.bundle }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- "$LOCK_PATH"; then
+            echo "Lock unchanged after packaging; nothing to commit."
+            exit 0
+          fi
+          git config user.name "buzz-offline-bot"
+          git config user.email "buzz-offline-bot@users.noreply.github.com"
+          git add "$LOCK_PATH"
+          git commit -m "chore(offline): pin image digests for ${BUNDLE} [skip ci]"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

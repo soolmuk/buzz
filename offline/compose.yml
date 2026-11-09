@@ -1,0 +1,196 @@
+# Buzz relay — offline / air-gapped single-node stack.
+#
+# Design rules for this file (do not relax them casually):
+#
+#   1. HTTP only. No TLS terminator, no Caddy, no certificate. The relay serves
+#      the web UI and the WebSocket on the same origin, so http://<host> and
+#      ws://<host> are the whole deployment surface.
+#   2. No image pull. Every image is loaded from a tarball shipped in the
+#      GitHub Release (`offline/scripts/install.sh` loads them) and referenced
+#      here by a local tag. `pull_policy: never` makes a missing image a loud
+#      failure instead of a silent network fetch.
+#   3. Offline by construction. Postgres, Redis, object storage and the git
+#      volume are local. Every external feature (mobile push gateway, KLIPY GIF
+#      search, hosted NIP-FI identity) is off in `.env.example`: nothing in this
+#      stack needs DNS or an internet route.
+#   4. Data services sit on an `internal` network with no gateway; only the
+#      relay is also attached to the `edge` network that carries the published
+#      port. A compromised or misconfigured dependency cannot reach the
+#      internet, and neither can the relay's dependency traffic.
+#
+# Image references come from `.env`, which `install.sh` writes from
+# `images.lock` (the pinned digests released with the bundle).
+
+name: buzz-offline
+
+services:
+  relay:
+    image: ${OFFLINE_IMAGE_RELAY:?run offline/scripts/install.sh (or write .env) first}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      # ── listener ────────────────────────────────────────────────────────────
+      BUZZ_BIND_ADDR: 0.0.0.0:3000
+      BUZZ_HEALTH_PORT: "8080"
+      BUZZ_METRICS_PORT: "9102"
+      # Public WebSocket URL. Used for NIP-42 challenges, invite links, media
+      # URLs and git clone URLs, so it must be exactly what clients use.
+      RELAY_URL: ${RELAY_URL:?set RELAY_URL (e.g. ws://166.103.175.321)}
+      # ── secrets (stable across restarts; back up with the volumes) ──────────
+      BUZZ_RELAY_PRIVATE_KEY: ${BUZZ_RELAY_PRIVATE_KEY:?set BUZZ_RELAY_PRIVATE_KEY}
+      BUZZ_GIT_HOOK_HMAC_SECRET: ${BUZZ_GIT_HOOK_HMAC_SECRET:?set BUZZ_GIT_HOOK_HMAC_SECRET}
+      # ── data plane, all local ───────────────────────────────────────────────
+      DATABASE_URL: postgres://${POSTGRES_USER:-buzz}:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-buzz}
+      REDIS_URL: redis://:${REDIS_PASSWORD:?set REDIS_PASSWORD}@redis:6379
+      BUZZ_S3_ENDPOINT: http://silo:9000
+      # Docker DNS resolves `silo`, not `<bucket>.silo`: path-style only.
+      BUZZ_S3_ADDRESSING_STYLE: path
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+      BUZZ_GIT_REPO_PATH: /data/git
+      # First boot on a fresh database needs embedded migrations applied.
+      BUZZ_AUTO_MIGRATE: "true"
+      BUZZ_GIT_CONFORMANCE_PROBE: ${BUZZ_GIT_CONFORMANCE_PROBE:-true}
+      # ── external features, explicitly off ───────────────────────────────────
+      BUZZ_PUSH_ENABLED: "false"
+      BUZZ_KLIPY_API_KEY: ""
+      # Never send telemetry/shape traffic out; unset variables already default
+      # to off, these lines keep a stray .env from turning anything back on.
+      BUZZ_NIP_FI_MODE: ""
+      BUZZ_MESH: "off"
+    ports:
+      # The deployment surface: http://<host> and ws://<host> on this port.
+      - "${OFFLINE_HTTP_PORT:-80}:3000"
+      # Health router, loopback only, for `verify.sh` and operators.
+      - "127.0.0.1:${OFFLINE_HEALTH_PORT:-18080}:8080"
+    volumes:
+      - buzz-git-data:/data/git
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      silo:
+        condition: service_healthy
+      object-bucket-init:
+        condition: service_completed_successfully
+    # The runtime image has bash + curl but not socat; probe over /dev/tcp.
+    healthcheck:
+      test:
+        [
+          "CMD-SHELL",
+          "bash -ec 'exec 3<>/dev/tcp/127.0.0.1/8080; printf \"GET /_readiness HTTP/1.1\\r\\nHost: 127.0.0.1\\r\\nConnection: close\\r\\n\\r\\n\" >&3; grep -q \"200 OK\" <&3'",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 30s
+    networks:
+      - data
+      - edge
+
+  postgres:
+    image: ${OFFLINE_IMAGE_POSTGRES:?run offline/scripts/install.sh (or write .env) first}
+    pull_policy: never
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-buzz}
+      POSTGRES_USER: ${POSTGRES_USER:-buzz}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - buzz-postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - data
+
+  redis:
+    image: ${OFFLINE_IMAGE_REDIS:?run offline/scripts/install.sh (or write .env) first}
+    pull_policy: never
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--requirepass", "${REDIS_PASSWORD:?set REDIS_PASSWORD}"]
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD}
+    volumes:
+      - buzz-redis-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+      start_period: 5s
+    networks:
+      - data
+
+  silo:
+    # Silo is the maintained MinIO fork used by upstream's compose bundle; it
+    # keeps the MinIO API and health endpoints.
+    image: ${OFFLINE_IMAGE_SILO:?run offline/scripts/install.sh (or write .env) first}
+    pull_policy: never
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      MINIO_ROOT_PASSWORD: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+    volumes:
+      - buzz-silo-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 10s
+    networks:
+      - data
+
+  object-bucket-init:
+    image: ${OFFLINE_IMAGE_MC:?run offline/scripts/install.sh (or write .env) first}
+    pull_policy: never
+    depends_on:
+      silo:
+        condition: service_healthy
+    environment:
+      BUZZ_S3_ACCESS_KEY: ${BUZZ_S3_ACCESS_KEY:?set BUZZ_S3_ACCESS_KEY}
+      BUZZ_S3_SECRET_KEY: ${BUZZ_S3_SECRET_KEY:?set BUZZ_S3_SECRET_KEY}
+      BUZZ_S3_BUCKET: ${BUZZ_S3_BUCKET:-buzz-media}
+    entrypoint: >
+      /bin/sh -euc '
+        mc alias set local http://silo:9000 "$${BUZZ_S3_ACCESS_KEY}" "$${BUZZ_S3_SECRET_KEY}"
+        mc mb --ignore-existing "local/$${BUZZ_S3_BUCKET}"
+        mc anonymous set none "local/$${BUZZ_S3_BUCKET}"
+      '
+    restart: "no"
+    networks:
+      - data
+
+volumes:
+  buzz-postgres-data:
+    labels:
+      com.buzz.volume: postgres
+  buzz-redis-data:
+    labels:
+      com.buzz.volume: redis
+  buzz-silo-data:
+    labels:
+      com.buzz.volume: object-storage
+  buzz-git-data:
+    labels:
+      com.buzz.volume: git
+
+networks:
+  # No gateway: the data plane cannot reach the internet.
+  data:
+    internal: true
+    labels:
+      com.buzz.network: offline-data
+  # Carries the published port only.
+  edge:
+    driver: bridge
+    labels:
+      com.buzz.network: offline-edge
