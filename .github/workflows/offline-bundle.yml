@@ -8,7 +8,8 @@ name: Offline bundle
 # publication, and `offline/images.lock` pins every image by digest, so this
 # layer tracks upstream updates without touching upstream source.
 #
-#   schedule        daily digest check; a release is cut only when a digest moved
+#   schedule        digest check every 3 days (03:17 UTC); a release is cut only
+#                   when a digest moved
 #   workflow_dispatch  manual run (force / pin a relay tag / pick arches)
 #
 # A run creates exactly one release named `offline-<UTC date>`; that name is
@@ -17,7 +18,9 @@ name: Offline bundle
 
 on:
   schedule:
-    - cron: "17 3 * * *"
+    # Every 3 days: day-of-month step 3 (1,4,7,…). At a month boundary the gap
+    # can be 1 or 2 days instead of 3 — cron has no "every N days" form.
+    - cron: "17 3 */3 * *"
   workflow_dispatch:
     inputs:
       upstream_tag:

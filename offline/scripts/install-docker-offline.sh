@@ -23,42 +23,54 @@ fi
 
 [ "$(uname -m)" = "x86_64" ] || die "these packages are amd64 only (this host is $(uname -m))"
 
-# Dependency order: the packages a minimal Ubuntu 24.04 is missing first (the
-# CLI and runtime, then the daemon last).
+# Everything in this folder that the host is missing gets installed: the docker
+# packages themselves (always, they are upgrades) plus the iptables/nftables
+# closure a minimal Ubuntu 24.04 lacks — dockerd cannot build its bridge or
+# publish a port without them. No package list is kept here on purpose, so the
+# set cannot drift from what CI actually shipped.
 #
-# dockerd cannot publish a port or build its bridge without iptables/nftables,
-# and a minimal Ubuntu 24.04 has neither, so the bundle carries them and their
-# libraries too. Those are skipped when the host already has them; the docker
-# packages themselves are always installed (they are upgrades).
-netfilter=(netbase libmnl0 libnfnetlink0 libnftnl11 libnetfilter-conntrack3
-           libnftables1 libip4tc2 libip6tc2 libxtables12 iptables nftables)
-order=(containerd.io docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce)
+# The docker packages go last: they depend on the toolchain unpacked before
+# them, and dpkg configures in the order it is handed the files.
 installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
-debs=()
-for pkg in "${netfilter[@]}"; do
-  installed "$pkg" && continue
-  for f in "$HERE/${pkg}"_*.deb; do
-    [ -f "$f" ] && debs+=("$f")
-  done
+docker_pkgs=" docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin "
+deps=()
+docker=()
+for f in "$HERE"/*.deb; do
+  [ -f "$f" ] || continue
+  pkg=$(dpkg-deb -f "$f" Package 2>/dev/null || true)
+  [ -n "$pkg" ] || continue
+  case "$docker_pkgs" in
+    *" $pkg "*) docker+=("$f") ;;
+    *) installed "$pkg" || deps+=("$f") ;;
+  esac
 done
-for pkg in "${order[@]}"; do
-  for f in "$HERE/${pkg}"_*.deb; do
-    [ -f "$f" ] && debs+=("$f")
-  done
-done
+debs=("${deps[@]}" "${docker[@]}")
 [ "${#debs[@]}" -gt 0 ] || die "no .deb packages found in $HERE"
 
 say "installing ${#debs[@]} packages"
-if ! out=$(dpkg -i "${debs[@]}" 2>&1); then
+set +e
+out=$(dpkg -i "${debs[@]}" 2>&1)
+rc=$?
+set -e
+if [ "$rc" != 0 ]; then
   printf '%s\n' "$out" | tail -20
-  missing=$(printf '%s\n' "$out" | sed -nE 's/.*Depends: ([^;]+).*/\1/p' | tr ',' '\n' | sed 's/(.*)//;s/^ *//' | sort -u | tr '\n' ' ')
+  # A package whose dependency only appeared later in the batch is unpacked but
+  # unconfigured; a second pass converges instead of failing the install.
+  say "re-running configuration for packages that needed a later dependency"
+  dpkg --configure -a >/dev/null 2>&1 || true
+fi
+
+audit=$(dpkg --audit 2>&1 || true)
+if [ -n "$audit" ]; then
+  printf '%s\n' "$audit" >&2
+  missing=$(printf '%s\n' "$out$audit" | sed -nE 's/.*depends on ([^;]+);.*/\1/p' | sed 's/ (.*//' | sort -u | tr '\n' ' ')
   cat >&2 <<EOF
 
-error: dpkg could not finish the install.
+error: some packages are still unconfigured.
 missing/unsatisfied dependencies: ${missing:-unknown}
 
 On a machine with internet and the same Ubuntu 24.04 (amd64), run:
-    apt-get download iptables nftables ${missing}
+    apt-get download ${missing:-iptables nftables}
 copy the resulting .deb files into this folder and run this script again.
 EOF
   exit 1
