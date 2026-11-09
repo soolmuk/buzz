@@ -30,19 +30,32 @@ upstream moves, only `images.lock` changes — there is nothing to rebase.
   postgres      redis      silo (s3)     /data/git volume
 ```
 
-The dependency plane (Postgres, Redis, object store) is on an `internal`
-network with no gateway, so it has no route to the internet — verified:
+**Nothing in the stack needs an internet route, and nothing may use one.**
 
-```
-$ docker compose exec postgres bash -c 'exec 3<>/dev/tcp/1.1.1.1/443'
-bash: connect: Network unreachable
-```
+- The dependency plane (Postgres, Redis, object store) is on an `internal`
+  network with no gateway: it has no route out, by construction.
+- The relay needs a non-internal network because Docker only publishes ports
+  for containers attached to one. That network is created with
+  `enable_ip_masquerade=false`, so the relay's outbound packets carry an
+  unroutable `10.42.250.0/24` source — it accepts inbound connections on the
+  published port and cannot get a reply from anything outside. Treat that as
+  defense in depth, not a guarantee: packets still leave the interface.
+- For a hard guarantee on a host that does have an internet route, block it at
+  the host firewall:
 
-The relay itself must also sit on a non-internal network, because Docker only
-publishes ports for containers attached to one; that interface is the egress
-path. Nothing in the relay's configuration points outward (push, GIF search,
-NIP-FI and mesh are off), but if you need a hard egress guarantee, block it at
-the host firewall — the only port that must stay open is the published one.
+  ```bash
+  sudo scripts/lockdown.sh apply     # DOCKER-USER: drop egress, keep replies
+  scripts/lockdown.sh status
+  ```
+
+  The rules sit in `DOCKER-USER`, survive `docker compose down/up`, and are
+  installed as a systemd unit so they come back after a reboot. On a genuinely
+  air-gapped host they are belt-and-braces: `verify.sh` already passes because
+  the probe has no route.
+
+Every run of `verify.sh` asserts this both ways: each container must fail to
+reach `1.1.1.1:443`, **and** the published port must still answer HTTP 200 from
+outside the container.
 
 ## Getting a bundle
 

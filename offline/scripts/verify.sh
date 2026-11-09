@@ -7,9 +7,10 @@
 # python or websocket tooling of its own:
 #
 #   1. every service is running / healthy
-#   2. /_liveness and /_readiness answer 200
-#   3. the web UI is served at / (the bundle clients load)
-#   4. a WebSocket upgrade on the app port returns 101
+#   2. no container can reach the internet, while the published port still works
+#   3. /_liveness and /_readiness answer 200
+#   4. the relay document is served at / and the web bundle at /invite/<code>
+#   5. a WebSocket upgrade on the app port returns 101
 #
 # The deeper NIP-42 auth + publish + read round trip is
 # scripts/verify-nip42.py (needs python3 with the `websockets` package; run it
@@ -58,6 +59,20 @@ for svc in relay postgres redis silo; do
   fi
 done
 
+# 1b ── egress lockdown: no container may reach the internet.
+# The relay's only outward-facing network has NAT disabled, so its outbound
+# packets are unroutable while the DNAT'd published port still accepts inbound
+# connections. Assert both halves: blocked egress, working ingress.
+for svc in relay postgres redis silo; do
+  if docker compose -f "$COMPOSE" exec -T "$svc" sh -c '
+        if command -v nc >/dev/null 2>&1; then nc -z -w 3 1.1.1.1 443;
+        else curl -sS --max-time 3 -o /dev/null http://1.1.1.1; fi' >/dev/null 2>&1; then
+    bad "$svc reached 1.1.1.1:443 — the host has a route out; run 'sudo scripts/lockdown.sh apply' (on an air-gapped host this check passes on its own)"
+  else
+    ok "$svc has no outbound internet"
+  fi
+done
+
 # 2 ── health routers
 if in_relay 'exec 3<>/dev/tcp/127.0.0.1/8080; printf "GET /_liveness HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n" >&3; grep -q "200 OK" <&3'; then
   ok "/_liveness 200"
@@ -91,6 +106,24 @@ if in_relay 'exec 3<>/dev/tcp/127.0.0.1/3000; printf "GET / HTTP/1.1\r\nHost: %s
   ok "websocket upgrade 101 on :3000"
 else
   bad "websocket upgrade did not return 101"
+fi
+
+# 5b ── ingress through the published port, from outside the container
+pub_host=""
+pub_port=""
+if [ -f "$ENV_FILE" ]; then
+  pub_host=$(sed -nE 's/^OFFLINE_PUBLIC_HOST=//p' "$ENV_FILE" | head -1)
+  pub_port=$(sed -nE 's/^OFFLINE_HTTP_PORT=//p' "$ENV_FILE" | head -1)
+fi
+pub_port="${pub_port:-80}"
+pub_host="${pub_host:-127.0.0.1}"
+if (exec 3<>"/dev/tcp/${pub_host}/${pub_port}" 2>/dev/null; \
+    printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$authority" >&3; \
+    IFS= read -r -t 5 line <&3; \
+    case "$line" in *" 200 "*) exit 0 ;; *) exit 1 ;; esac) 2>/dev/null; then
+  ok "published port ${pub_host}:${pub_port} answers HTTP 200"
+else
+  bad "published port ${pub_host}:${pub_port} is not answering (firewall? wrong port?)"
 fi
 
 # ── how clients reach it

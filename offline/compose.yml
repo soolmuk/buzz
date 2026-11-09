@@ -190,7 +190,20 @@ networks:
     labels:
       com.buzz.network: offline-data
   # Carries the published port only.
+  #
+  # NAT is disabled on purpose (`enable_ip_masquerade=false`). A published port
+  # needs a non-internal network, but a plain bridge would also give the relay
+  # an unmetered route to the internet. Without masquerade the relay can accept
+  # inbound connections through the DNAT'd published port while its own outbound
+  # packets carry an unroutable 10.42.250.0/24 source and go nowhere. That is
+  # the difference between "configured not to phone home" and "cannot".
   edge:
     driver: bridge
+    driver_opts:
+      com.docker.network.bridge.enable_ip_masquerade: "false"
+    ipam:
+      config:
+        - subnet: ${OFFLINE_EDGE_SUBNET:-10.42.250.0/24}
+          gateway: ${OFFLINE_EDGE_GATEWAY:-10.42.250.1}
     labels:
       com.buzz.network: offline-edge

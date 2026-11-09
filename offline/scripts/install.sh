@@ -201,6 +201,9 @@ $(printf '\033[1;32mready\033[0m')  Buzz is up.
 In the Buzz client choose "Add community" and paste ${BASE/http:/ws:}
 (ws:// explicitly — a bare host is assumed to be wss://).
 
+Offline guarantee: containers already have no internet route, but if this host
+does have one, close it with: sudo ${OFFLINE_DIR}/scripts/lockdown.sh apply
+
 Logs:     docker compose -f ${OFFLINE_DIR}/compose.yml logs -f relay
 Back up:  ${OFFLINE_DIR}/scripts/backup.sh
 Upgrade:  drop the new release assets in ${IMAGES_DIR} and re-run this script
