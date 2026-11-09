@@ -70,7 +70,8 @@ buzz-offline-amd64-<release>.tar.gz.sha256   its checksum
   offline/                   this layer: compose, scripts, README
   offline/images/            relay, postgres, redis, silo, mc `docker save`
                              tarballs + images-<arch>.json/.txt + SHA256SUMS-<arch>
-  docker-debs/               (amd64 only) Docker Engine + compose .debs, install.sh
+  docker-debs/               (amd64 only) Docker Engine + compose .debs, the
+                             iptables/nftables closure, install.sh
 ```
 
 **Built locally** (needs internet and Docker):

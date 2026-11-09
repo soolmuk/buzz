@@ -204,6 +204,22 @@ jobs:
           done
           ls -lh /tmp/docker-debs
 
+      - name: Fetch iptables/nftables packages a minimal Ubuntu 24.04 lacks
+        # dockerd cannot build its bridge or publish a port without them, and a
+        # pristine Ubuntu 24.04 has neither. Let a pristine ubuntu:24.04 itself
+        # decide the exact closure, so no hand-kept dependency list can drift.
+        if: matrix.arch == 'amd64'
+        env:
+          BASE_IMAGE: ubuntu:24.04@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852
+        run: |
+          set -euo pipefail
+          docker run --rm -v /tmp/docker-debs:/out "$BASE_IMAGE" bash -ec '
+            apt-get update -qq
+            apt-get install -y -qq --no-install-recommends --download-only iptables nftables
+            cp /var/cache/apt/archives/*.deb /out/
+          '
+          ls -lh /tmp/docker-debs
+
       - name: Assemble the single-file bundle
         env:
           BUNDLE: ${{ needs.resolve.outputs.bundle }}

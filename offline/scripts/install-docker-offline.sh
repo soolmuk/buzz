@@ -4,8 +4,9 @@
 #   sudo ./install.sh            # Ubuntu 24.04 (amd64), no internet
 #
 # The archive's docker-debs/ directory carries docker-ce, docker-ce-cli,
-# containerd.io, docker-buildx-plugin and docker-compose-plugin. Nothing is
-# downloaded here.
+# containerd.io, docker-buildx-plugin and docker-compose-plugin, plus the
+# iptables/nftables packages a minimal Ubuntu 24.04 lacks (dockerd needs them
+# for its bridge and for publishing a port). Nothing is downloaded here.
 set -euo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -22,9 +23,24 @@ fi
 
 [ "$(uname -m)" = "x86_64" ] || die "these packages are amd64 only (this host is $(uname -m))"
 
-# Dependency order: the CLI and runtime first, the daemon last.
+# Dependency order: the packages a minimal Ubuntu 24.04 is missing first (the
+# CLI and runtime, then the daemon last).
+#
+# dockerd cannot publish a port or build its bridge without iptables/nftables,
+# and a minimal Ubuntu 24.04 has neither, so the bundle carries them and their
+# libraries too. Those are skipped when the host already has them; the docker
+# packages themselves are always installed (they are upgrades).
+netfilter=(netbase libmnl0 libnfnetlink0 libnftnl11 libnetfilter-conntrack3
+           libnftables1 libip4tc2 libip6tc2 libxtables12 iptables nftables)
 order=(containerd.io docker-ce-cli docker-buildx-plugin docker-compose-plugin docker-ce)
+installed() { dpkg-query -W -f='${Status}' "$1" 2>/dev/null | grep -q 'install ok installed'; }
 debs=()
+for pkg in "${netfilter[@]}"; do
+  installed "$pkg" && continue
+  for f in "$HERE/${pkg}"_*.deb; do
+    [ -f "$f" ] && debs+=("$f")
+  done
+done
 for pkg in "${order[@]}"; do
   for f in "$HERE/${pkg}"_*.deb; do
     [ -f "$f" ] && debs+=("$f")

@@ -48,7 +48,17 @@ tar -cf - -C "$(dirname "$OFFLINE_DIR")" \
 say "copying images"
 cp "$IMAGES_DIR"/*-linux-"${ARCH}".tar.gz "$ROOT/offline/images/"
 cp "$IMAGES_DIR/images-${ARCH}.txt" "$IMAGES_DIR/images-${ARCH}.json" "$ROOT/offline/images/"
-cp "$IMAGES_DIR/SHA256SUMS-${ARCH}" "$ROOT/offline/images/"
+
+# The sums file also covers the installing-layer tarball that package-images.sh
+# writes next to the images. That file is not inside this archive (the archive
+# IS the layer), and `sha256sum -c` fails on a missing file — which install.sh
+# runs under `set -e` — so keep only the lines whose file is actually here.
+while read -r sum file; do
+  [ -n "${file:-}" ] || continue
+  if [ -f "$ROOT/offline/images/${file#\*}" ]; then
+    printf '%s  %s\n' "$sum" "${file#\*}"
+  fi
+done <"$IMAGES_DIR/SHA256SUMS-${ARCH}" >"$ROOT/offline/images/SHA256SUMS-${ARCH}"
 
 if [ -n "$DEBS_DIR" ] && [ -d "$DEBS_DIR" ]; then
   say "copying Docker Engine packages for offline install"
@@ -64,7 +74,7 @@ say "writing QUICKSTART.md"
 # Buzz 오프라인 릴레이 — 설치 안내 (${ARCH}, ${RELEASE})
 
 인터넷이 없는 Ubuntu 24.04 (${ARCH}) 서버에 이 압축파일 하나만 옮기면 됩니다.
-안에 들어 있는 것: 릴레이 이미지 5개, compose/설치 스크립트, (해당하면) Docker 설치 패키지.
+안에 들어 있는 것: 릴레이 이미지 5개, compose/설치 스크립트, (amd64면) Docker Engine 패키지 + dockerd 가 쓰는 iptables/nftables 패키지.
 
 ## 1. 압축 풀기
 
@@ -80,8 +90,9 @@ docker version            # 이미 설치돼 있으면 3번으로
 cd docker-debs && sudo ./install.sh && cd ..
 \`\`\`
 
-의존 패키지가 없다고 나오면, 인터넷 되는 PC에서 같은 Ubuntu 24.04로
-\`apt-get download iptables nftables\` 를 받아 이 폴더에 넣고 다시 실행하세요.
+\`install.sh\` 는 최소 설치 Ubuntu 24.04 에 없는 iptables/nftables 와 그 라이브러리까지
+같이 설치합니다(이미 있으면 건너뜀). 그래도 "의존 패키지가 없다"고 나오면, 인터넷 되는 PC에서
+같은 Ubuntu 24.04 로 \`apt-get download <패키지명>\` 을 받아 이 폴더에 넣고 다시 실행하세요.
 
 ## 3. 설치
 
