@@ -1,14 +1,14 @@
 {
   "schema": 1,
-  "bundle": "offline-2026.11.09-1411",
+  "bundle": "offline-2026.11.10-0324",
   "upstream_tag": "main",
-  "generated_at": "2026-11-09T14:14:51Z",
+  "generated_at": "2026-11-10T03:28:17Z",
   "notes": "Pinned image digests for the offline bundle. The offline-bundle workflow rewrites this file when any digest moves; packaging pulls by digest so a tag move cannot change a bundle silently.",
   "images": [
     {
       "name": "relay",
       "ref": "ghcr.io/block/buzz:main",
-      "digest": "sha256:b7c63ac249113bcce173ab0d394902d0717bb3a1362a0a5ce258acd59f51dfab"
+      "digest": "sha256:54a4afedd45f7813fdc094aef65542f5e21d821fe9f7b3cb91fc7399f86b8490"
     },
     {
       "name": "postgres",
@@ -18,7 +18,7 @@
     {
       "name": "redis",
       "ref": "redis:7-alpine",
-      "digest": "sha256:c5d34a98396a4775e223c74e929162c35c5a2182901ba26b50ade939941ce14b"
+      "digest": "sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7"
     },
     {
       "name": "silo",
