@@ -5,6 +5,7 @@
 #
 # Outputs, in <outdir> (default ./dist):
 #   <name>-linux-<arch>.tar.gz   one gzipped `docker save` per image
+#                                (core images + the TLS-profile caddy image)
 #   images-<arch>.json           this arch's image IDs, for the merged lock
 #   buzz-offline-bundle-<arch>.tar.gz  the offline/ directory itself
 #   SHA256SUMS-<arch>            checksums for everything above
@@ -36,6 +37,8 @@ OUTDIR="$(cd "$OUTDIR" && pwd)"
 fragment=$(mktemp)
 echo '{"ids":{}}' >"$fragment"
 
+# Both the always-on images and the TLS-profile images (caddy) ship in the
+# bundle; install.sh loads caddy only when OFFLINE_TLS=1.
 while IFS=$'\t' read -r name repo digest; do
   ref="${repo}@${digest}"
   tag="buzz-offline/${name}:${RELEASE}"
@@ -57,7 +60,7 @@ while IFS=$'\t' read -r name repo digest; do
 
   # Drop the digest ref so the local daemon does not accumulate one per bundle.
   docker image rm "$ref" >/dev/null 2>&1 || true
-done < <(jq -r '.images[] | [.name, (.ref | sub(":.*$"; "")), .digest] | @tsv' "$LOCK")
+done < <(jq -r '(.images + (.tls // []))[] | [.name, (.ref | sub(":.*$"; "")), .digest] | @tsv' "$LOCK")
 
 jq --arg arch "$ARCH" --arg bundle "$RELEASE" \
   '{arch: $arch, bundle: $bundle, ids: .ids}' "$fragment" >"${OUTDIR}/images-${ARCH}.json"

@@ -2,9 +2,12 @@
 #
 # Design rules for this file (do not relax them casually):
 #
-#   1. HTTP only. No TLS terminator, no Caddy, no certificate. The relay serves
-#      the web UI and the WebSocket on the same origin, so http://<host> and
-#      ws://<host> are the whole deployment surface.
+#   1. TLS at the edge, plain HTTP inside. A caddy terminator (profile "tls")
+#      publishes the public port and serves the operator-issued certificate
+#      from ./certs; the relay still serves web + WebSocket on :3000 internally.
+#      Buzz desktop 1.0.0 only accepts wss://, so the TLS path is the default.
+#      Set OFFLINE_TLS=0 in .env for the legacy plain-HTTP deployment
+#      (relay published directly, RELAY_URL=ws://…).
 #   2. No image pull. Every image is loaded from a tarball shipped in the
 #      GitHub Release (`offline/scripts/install.sh` loads them) and referenced
 #      here by a local tag. `pull_policy: never` makes a missing image a loud
@@ -12,11 +15,12 @@
 #   3. Offline by construction. Postgres, Redis, object storage and the git
 #      volume are local. Every external feature (mobile push gateway, KLIPY GIF
 #      search, hosted NIP-FI identity) is off in `.env.example`: nothing in this
-#      stack needs DNS or an internet route.
+#      stack needs DNS or an internet route. Caddy gets explicit certificate
+#      files, so it never runs ACME.
 #   4. Data services sit on an `internal` network with no gateway; only the
-#      relay is also attached to the `edge` network that carries the published
-#      port. A compromised or misconfigured dependency cannot reach the
-#      internet, and neither can the relay's dependency traffic.
+#      relay and caddy are also attached to the `edge` network that carries the
+#      published ports. A compromised or misconfigured dependency cannot reach
+#      the internet, and neither can the relay's dependency traffic.
 #
 # Image references come from `.env`, which `install.sh` writes from
 # `images.lock` (the pinned digests released with the bundle).
@@ -34,8 +38,9 @@ services:
       BUZZ_HEALTH_PORT: "8080"
       BUZZ_METRICS_PORT: "9102"
       # Public WebSocket URL. Used for NIP-42 challenges, invite links, media
-      # URLs and git clone URLs, so it must be exactly what clients use.
-      RELAY_URL: ${RELAY_URL:?set RELAY_URL (e.g. ws://166.103.175.321)}
+      # URLs and git clone URLs, so it must be exactly what clients use:
+      # wss://<host>[:<port>] behind the TLS terminator, ws://… without it.
+      RELAY_URL: ${RELAY_URL:?set RELAY_URL (e.g. wss://203.0.113.10:40009)}
       # ── secrets (stable across restarts; back up with the volumes) ──────────
       BUZZ_RELAY_PRIVATE_KEY: ${BUZZ_RELAY_PRIVATE_KEY:?set BUZZ_RELAY_PRIVATE_KEY}
       BUZZ_GIT_HOOK_HMAC_SECRET: ${BUZZ_GIT_HOOK_HMAC_SECRET:?set BUZZ_GIT_HOOK_HMAC_SECRET}
@@ -60,8 +65,9 @@ services:
       BUZZ_NIP_FI_MODE: ""
       BUZZ_MESH: "off"
     ports:
-      # The deployment surface: http://<host> and ws://<host> on this port.
-      - "${OFFLINE_HTTP_PORT:-80}:3000"
+      # Plain HTTP is a loopback-only debugging surface when TLS is on
+      # (OFFLINE_HTTP_BIND defaults to 0.0.0.0 for legacy plain-HTTP deploys).
+      - "${OFFLINE_HTTP_BIND:-0.0.0.0}:${OFFLINE_HTTP_PORT:-80}:3000"
       # Health router, loopback only, for `verify.sh` and operators.
       - "127.0.0.1:${OFFLINE_HEALTH_PORT:-18080}:8080"
     volumes:
@@ -88,6 +94,38 @@ services:
       start_period: 30s
     networks:
       - data
+      - edge
+
+  # TLS terminator. Started only under the "tls" profile (set-address.sh /
+  # install.sh export COMPOSE_PROFILES=tls when OFFLINE_TLS=1). Publishes the
+  # public wss port and proxies everything else to the relay, forwarding the
+  # client Host header unchanged (the relay resolves communities by Host).
+  caddy:
+    profiles: ["tls"]
+    image: ${OFFLINE_IMAGE_CADDY:?run install.sh from the TLS bundle (caddy image) first}
+    pull_policy: never
+    restart: unless-stopped
+    ports:
+      # The deployment surface: wss://<host>:<OFFLINE_TLS_PORT> and
+      # https://<host>:<OFFLINE_TLS_PORT> for invite links.
+      - "${OFFLINE_TLS_PORT:-40009}:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      # Operator-issued certificate (scripts/make-ca.sh). ca.key never leaves
+      # the server; only the leaf is needed here, but the dir is mounted whole.
+      - ./certs:/certs:ro
+    depends_on:
+      relay:
+        condition: service_healthy
+    healthcheck:
+      # Answered by caddy itself over TLS; certificate validity is not checked
+      # here (that is verify.sh's job against ca.crt).
+      test: ["CMD-SHELL", "wget -q --no-check-certificate -O /dev/null https://127.0.0.1/_tls_health"]
+      interval: 10s
+      timeout: 3s
+      retries: 12
+      start_period: 10s
+    networks:
       - edge
 
   postgres:
@@ -189,7 +227,7 @@ networks:
     internal: true
     labels:
       com.buzz.network: offline-data
-  # Carries the published port only.
+  # Carries the published ports only.
   #
   # NAT is disabled on purpose (`enable_ip_masquerade=false`). A published port
   # needs a non-internal network, but a plain bridge would also give the relay
@@ -197,6 +235,8 @@ networks:
   # inbound connections through the DNAT'd published port while its own outbound
   # packets carry an unroutable 10.42.250.0/24 source and go nowhere. That is
   # the difference between "configured not to phone home" and "cannot".
+  # Container-to-container traffic inside the bridge (caddy -> relay) does not
+  # need masquerade and keeps working.
   edge:
     driver: bridge
     driver_opts:

@@ -6,11 +6,13 @@
 # Checks run inside the relay container so the target host needs no curl,
 # python or websocket tooling of its own:
 #
-#   1. every service is running / healthy
+#   1. every service is running / healthy (caddy too when OFFLINE_TLS=1)
 #   2. no container can reach the internet, while the published port still works
 #   3. /_liveness and /_readiness answer 200
 #   4. the relay document is served at / and the web bundle at /invite/<code>
 #   5. a WebSocket upgrade on the app port returns 101
+#   5b. the published public port answers (TLS ServerHello when OFFLINE_TLS=1)
+#   5c. the server certificate chains to certs/ca.crt and its SAN matches the host
 #
 # The deeper NIP-42 auth + publish + read round trip is
 # scripts/verify-nip42.py (needs python3 with the `websockets` package; run it
@@ -34,6 +36,18 @@ relay_url=""
 authority="${relay_url#*://}"
 authority="${authority%%/*}"
 authority="${authority:-127.0.0.1}"
+tls="0"
+pub_host="127.0.0.1"
+pub_port="80"
+tls_port="40009"
+if [ -f "$ENV_FILE" ]; then
+  tls=$(sed -nE 's/^OFFLINE_TLS=//p' "$ENV_FILE" | head -1); tls="${tls:-1}"
+  pub_host=$(sed -nE 's/^OFFLINE_PUBLIC_HOST=//p' "$ENV_FILE" | head -1); pub_host="${pub_host:-127.0.0.1}"
+  pub_port=$(sed -nE 's/^OFFLINE_HTTP_PORT=//p' "$ENV_FILE" | head -1); pub_port="${pub_port:-80}"
+  tls_port=$(sed -nE 's/^OFFLINE_TLS_PORT=//p' "$ENV_FILE" | head -1); tls_port="${tls_port:-40009}"
+fi
+# compose profiles must match what install.sh/set-address.sh started.
+if [ "$tls" = "1" ]; then export COMPOSE_PROFILES=tls; else unset COMPOSE_PROFILES; fi
 
 in_relay() {
   docker compose -f "$COMPOSE" exec -T -e VERIFY_AUTHORITY="$authority" relay bash -ec "$1" >/dev/null 2>&1
@@ -58,6 +72,13 @@ for svc in relay postgres redis silo; do
     bad "service $svc not running (docker compose -f $COMPOSE logs $svc)"
   fi
 done
+if [ "$tls" = "1" ]; then
+  if docker compose -f "$COMPOSE" ps --status running --services 2>/dev/null | grep -qx "caddy"; then
+    ok "service caddy (TLS terminator) running"
+  else
+    bad "service caddy not running (docker compose -f $COMPOSE logs caddy)"
+  fi
+fi
 
 # 1b ── egress lockdown: no container may reach the internet.
 # The relay's only outward-facing network has NAT disabled, so its outbound
@@ -108,37 +129,60 @@ else
   bad "websocket upgrade did not return 101"
 fi
 
-# 5b ── ingress through the published port, from outside the container
-pub_host=""
-pub_port=""
-if [ -f "$ENV_FILE" ]; then
-  pub_host=$(sed -nE 's/^OFFLINE_PUBLIC_HOST=//p' "$ENV_FILE" | head -1)
-  pub_port=$(sed -nE 's/^OFFLINE_HTTP_PORT=//p' "$ENV_FILE" | head -1)
-fi
-pub_port="${pub_port:-80}"
-pub_host="${pub_host:-127.0.0.1}"
-if (exec 3<>"/dev/tcp/${pub_host}/${pub_port}" 2>/dev/null; \
-    printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$authority" >&3; \
-    IFS= read -r -t 5 line <&3; \
-    case "$line" in *" 200 "*) exit 0 ;; *) exit 1 ;; esac) 2>/dev/null; then
-  ok "published port ${pub_host}:${pub_port} answers HTTP 200"
+# 5b ── ingress through the published port, from outside the container ────────
+if [ "$tls" = "1" ]; then
+  # TLS on: the public port is the caddy terminator's. A TLS ClientHello that
+  # gets a ServerHello back proves the listener and the certificate load;
+  # chain/SAN validation against our own CA is check 5c below.
+  if (exec 3<>"/dev/tcp/${pub_host}/${tls_port}" 2>/dev/null; \
+      printf '\x16\x03\x01\x00\x2e\x01\x00\x00\x2a\x03\x03' >&3 2>/dev/null; \
+      IFS= read -r -t 5 -n 5 resp <&3; \
+      case "$resp" in $'\x16\x03'*) exit 0 ;; *) exit 1 ;; esac) 2>/dev/null; then
+    ok "published TLS port ${pub_host}:${tls_port} answers (TLS ServerHello)"
+  else
+    bad "published TLS port ${pub_host}:${tls_port} is not answering (firewall? wrong port?)"
+  fi
 else
-  bad "published port ${pub_host}:${pub_port} is not answering (firewall? wrong port?)"
+  if (exec 3<>"/dev/tcp/${pub_host}/${pub_port}" 2>/dev/null; \
+      printf 'GET / HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n' "$authority" >&3; \
+      IFS= read -r -t 5 line <&3; \
+      case "$line" in *" 200 "*) exit 0 ;; *) exit 1 ;; esac) 2>/dev/null; then
+    ok "published port ${pub_host}:${pub_port} answers HTTP 200"
+  else
+    bad "published port ${pub_host}:${pub_port} is not answering (firewall? wrong port?)"
+  fi
 fi
 
-# ── how clients reach it
+# 5c ── TLS path: certificate chains to the bundle CA and matches the host SAN.
+if [ "$tls" = "1" ]; then
+  if command -v openssl >/dev/null 2>&1 && [ -f "$OFFLINE_DIR/certs/ca.crt" ]; then
+    if openssl verify -CAfile "$OFFLINE_DIR/certs/ca.crt" "$OFFLINE_DIR/certs/server.crt" >/dev/null 2>&1; then
+      ok "server certificate chains to certs/ca.crt"
+    else
+      bad "certs/server.crt does not verify against certs/ca.crt"
+    fi
+    if openssl x509 -in "$OFFLINE_DIR/certs/server.crt" -noout -checkhost "$pub_host" >/dev/null 2>&1; then
+      ok "certificate SAN matches ${pub_host}"
+    else
+      bad "certificate SAN does not match ${pub_host} — re-issue: scripts/make-ca.sh --host ${pub_host} --port ${tls_port}"
+    fi
+  else
+    echo "  note: openssl or certs/ca.crt missing — skipping certificate checks"
+  fi
+fi
+
+# ── how clients reach it ────────────────────────────────────────────────────
 if [ -f "$ENV_FILE" ]; then
-  http_port=$(sed -nE 's/^OFFLINE_HTTP_PORT=//p' "$ENV_FILE" | head -1)
   host=$(sed -nE 's/^OFFLINE_PUBLIC_HOST=//p' "$ENV_FILE" | head -1)
   relay_url=$(sed -nE 's/^RELAY_URL=//p' "$ENV_FILE" | head -1)
+  web_url=$(printf '%s' "$relay_url" | sed -e 's|^wss://|https://|' -e 's|^ws://|http://|')
   echo
-  if [ "${http_port:-80}" = "80" ]; then
-    echo "  open:  http://${host}"
-  else
-    echo "  open:  http://${host}:${http_port}"
+  echo "  relay (app): ${relay_url}"
+  echo "  web/invite:  ${web_url}"
+  echo "  health:      http://127.0.0.1:$(sed -nE 's/^OFFLINE_HEALTH_PORT=//p' "$ENV_FILE" | head -1)/_readiness"
+  if [ "$tls" = "1" ]; then
+    echo "  CA cert for clients: ${OFFLINE_DIR}/certs/ca.crt  (+ certs/install-ca.bat on Windows)"
   fi
-  echo "  relay: ${relay_url}"
-  echo "  health: http://127.0.0.1:$(sed -nE 's/^OFFLINE_HEALTH_PORT=//p' "$ENV_FILE" | head -1)/_readiness"
 fi
 
 echo

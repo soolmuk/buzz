@@ -1,0 +1,24 @@
+# Buzz offline relay — TLS terminator (caddy).
+#
+# The relay itself stays plain HTTP inside the compose network; caddy is the
+# only client-facing service and publishes host OFFLINE_TLS_PORT -> :443.
+# Desktop 1.0.0 only accepts wss://, so clients use wss://<host>:<port>.
+#
+# The certificate is the operator's own (offline/scripts/make-ca.sh), mounted
+# from ./certs — no ACME, no DNS, no internet.
+
+:443 {
+	# Operator-issued leaf: SAN must match the host clients type (IP or DNS).
+	tls /certs/server.crt /certs/server.key
+
+	# Liveness probe for the container healthcheck (answered by caddy
+	# itself, not proxied).
+	handle /_tls_health {
+		respond "ok" 200
+	}
+
+	# Everything else — web bundle, WebSocket (upgrade passed through),
+	# REST, git smart HTTP — goes to the relay. The Host header is forwarded
+	# unchanged, which is what the relay uses to resolve the community.
+	reverse_proxy relay:3000
+}

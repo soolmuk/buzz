@@ -3,7 +3,7 @@
 
 Run from a workstation that has python3 + the `websockets` package:
 
-    python3 scripts/verify-nip42.py ws://166.103.175.321
+    python3 scripts/verify-nip42.py wss://203.0.113.10:40009   # wss verifies against offline/certs/ca.crt
 
 It signs a real Nostr auth event (BIP340, pure Python — no dependencies beyond
 `websockets`), authenticates, publishes a kind:1 event and reads it back by id.
@@ -19,6 +19,7 @@ import hashlib
 import json
 import os
 import secrets
+import ssl
 import sys
 import time
 
@@ -147,7 +148,16 @@ async def main(url: str) -> int:
             print(f"  {FAIL} {label}{(' — ' + detail) if detail else ''}")
 
     print(f"NIP-42 round trip against {url}")
-    async with websockets.connect(url, open_timeout=10) as ws:
+    ssl_ctx = None
+    if url.lower().startswith("wss://"):
+        # Verify against the bundle CA when it sits next to this script's
+        # offline layer (offline/certs/ca.crt); otherwise the system roots.
+        ca = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "certs", "ca.crt")
+        if os.path.isfile(ca):
+            ssl_ctx = ssl.create_default_context(cafile=ca)
+        else:
+            ssl_ctx = ssl.create_default_context()
+    async with websockets.connect(url, open_timeout=10, ssl=ssl_ctx) as ws:
         challenge_msg = await recv_until(ws, "AUTH")
         challenge = challenge_msg[1]
         report(bool(challenge), "AUTH challenge received")
@@ -194,5 +204,9 @@ async def main(url: str) -> int:
 
 
 if __name__ == "__main__":
-    target = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("RELAY_URL", "ws://127.0.0.1")
+    target = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("RELAY_URL", "wss://127.0.0.1:40009")
+    if target.lower().startswith("https://"):
+        target = "wss://" + target[len("https://"):]
+    elif target.lower().startswith("http://"):
+        target = "ws://" + target[len("http://"):]
     sys.exit(asyncio.run(main(target)))

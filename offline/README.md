@@ -1,7 +1,8 @@
 # Offline Buzz relay bundle
 
 A self-contained, air-gapped Buzz relay: one tarball of Docker images, one
-compose file, plain HTTP, no internet, no TLS, no reverse proxy.
+compose file, TLS at the edge (caddy + a private CA issued on the server), no
+internet. Plain HTTP (`ws://`) remains available as a legacy option.
 
 This directory is a **layer above upstream**. It never patches relay source; it
 consumes the published `ghcr.io/block/buzz` image and pins it by digest. When
@@ -10,8 +11,8 @@ upstream moves, only `images.lock` changes — there is nothing to rebase.
 | # | Requirement | How it is met |
 |---|---|---|
 | 1 | Run fully offline | Every image ships as a `docker save` tarball; compose sets `pull_policy: never`; Postgres/Redis/object storage/git are local; push gateway, GIF search, NIP-FI and mesh are explicitly off; data services sit on a Docker `internal` network with no gateway |
-| 2 | Reachable at `http://<server-ip>` | Relay port 3000 is published on host port 80; the relay serves the web UI and the WebSocket on that one port |
-| 3 | HTTP, not HTTPS | No TLS terminator at all — see [Why no Caddy](#why-no-caddy). `RELAY_URL` is `ws://…`, which makes the relay mint `http://` media and invite URLs |
+| 2 | Reachable at `wss://<server-ip>:40009` | Caddy (TLS terminator, `tls` compose profile) publishes the public port and proxies to the relay; the relay serves web + WebSocket on :3000 internally |
+| 3 | TLS with a private CA | `scripts/make-ca.sh` issues the CA + a leaf whose SAN is the exact host clients type (IP or DNS) — no public domain or Let's Encrypt needed. Clients trust `ca.crt` once per machine (Windows: `certs/install-ca.bat`). `RELAY_URL` is `wss://…`, so the relay mints `https://` media and invite URLs. `install.sh --no-tls` keeps the legacy plain-HTTP `ws://` deployment |
 | 4 | Survives upstream updates | Images are vendored by digest; the overlay is this directory plus one workflow file, both of which upstream never touches |
 | 5 | Images as files on a GitHub Release | `.github/workflows/offline-bundle.yml` runs `docker save` and publishes `*-linux-<arch>.tar.gz` + `SHA256SUMS-<arch>` as release assets |
 | 6 | Auto-release when images change | Daily digest check; a release is cut only when a digest actually moved (or `force` on a manual run) |
@@ -19,11 +20,14 @@ upstream moves, only `images.lock` changes — there is nothing to rebase.
 ## Architecture
 
 ```
-                     host port 80
+                host port 40009 (wss/https)
                           │
               ┌───────────▼────────────┐
-              │ relay (buzz image)     │  web UI + WebSocket + REST on :3000
-              │  RELAY_URL=ws://<host> │  health router on :8080 (loopback only)
+              │ caddy  (tls profile)   │  terminates TLS with certs/server.{crt,key}
+              └───────┬────────────────┘
+              ┌───────────▼────────────┐
+              │ relay (buzz image)     │  web UI + WebSocket + REST on :3000 (plain HTTP inside)
+              │  RELAY_URL=wss://<host>:40009 │  health router on :8080 (loopback only)
               └───────┬────────────────┘
         internal network (no gateway)
       ┌───────────┬───┴───────┬──────────────┐
@@ -68,8 +72,11 @@ buzz-offline-amd64-<release>.tar.gz.sha256   its checksum
 
   QUICKSTART.md              step-by-step install, in Korean
   offline/                   this layer: compose, scripts, README
-  offline/images/            relay, postgres, redis, silo, mc `docker save`
+  offline/images/            relay, postgres, redis, silo, mc, caddy `docker save`
                              tarballs + images-<arch>.json/.txt + SHA256SUMS-<arch>
+  offline/certs/             install-ca.bat / uninstall-ca.bat / README
+                             (the CA itself is generated on the server and is
+                             NOT in the archive)
   docker-debs/               (amd64 only) Docker Engine + compose .debs, the
                              iptables/nftables closure, install.sh
 ```
@@ -90,20 +97,27 @@ cd buzz-offline-amd64-<release>
 
 sudo docker-debs/install.sh          # only if docker is not installed yet
 cd offline
-sudo ./scripts/install.sh --host 166.103.175.321 --port 80
+sudo ./scripts/install.sh --host <server-ip> --tls-port 40009
 ```
 
 Nothing has to be moved around: the archive already puts the image tarballs in
 `offline/images/`, which is where `install.sh` looks.
 
-`install.sh` verifies checksums, loads the images, generates `.env` (relay key,
-HMAC secret, database/Redis/S3 credentials), starts the stack, waits for
-`/_readiness` and runs `verify.sh`.
+`install.sh` verifies checksums, loads the images (never pulls), issues the
+private CA + server certificate into `certs/` (`make-ca.sh`), generates `.env`
+(relay key, HMAC secret, database/Redis/S3 credentials), starts the stack with
+the `tls` profile, waits for `/_readiness` and runs `verify.sh`.
 
-Then point a client at `ws://166.103.175.321` — **type `ws://` explicitly**; the
-Buzz client assumes `wss://` for a bare host.
+Clients then use **`wss://<server-ip>:40009`** — Buzz desktop 1.0.0 accepts only
+`wss://` or `https://` (a bare host is upgraded to `wss://`; `ws://` is
+rejected by the app). Each client PC must trust the relay's CA root **once**:
+copy `offline/certs/ca.crt` + `offline/certs/install-ca.bat` to the PC and run
+the `.bat` as Administrator (one click). See [TLS and certificates](#tls-and-certificates).
 
-### What `http://<host>` actually serves
+Legacy plain-HTTP deployment: `sudo ./scripts/install.sh --host <server-ip>
+--no-tls --port 80`, clients then use `ws://<server-ip>` (older clients only).
+
+### What `https://<host>:<tls-port>` actually serves
 
 | path | response |
 |---|---|
@@ -113,18 +127,19 @@ Buzz client assumes `wss://` for a bare host.
 | `/assets/*`, `/media/*`, `/query`, … | bundle assets, media, HTTP query API |
 
 The relay does not serve the full app at `/`; upstream serves the SPA only on
-invite landing paths. So an invite link (`http://<host>/invite/<code>`) is the
-browser entry point, and the desktop app pointed at `ws://<host>` is the normal
-client. If you want the app itself at `/`, that needs a small static front end
-in front of the relay — say the word and it can be added as an optional service.
+invite landing paths. So an invite link (`https://<host>:<tls-port>/invite/<code>`)
+is the browser entry point, and the desktop app pointed at
+`wss://<host>:<tls-port>` is the normal client. If you want the app itself at
+`/`, that needs a small static front end in front of the relay — say the word
+and it can be added as an optional service.
 
 ## Changing the address
 
 The address is configuration, not a rebuild:
 
 ```bash
-./scripts/install.sh --host 10.0.0.7              # same port
-./scripts/install.sh --host buzz.example.lan --port 8080
+./scripts/set-address.sh --host 10.0.0.7                  # same wss port
+./scripts/set-address.sh --host buzz.example.lan --port 40009
 ```
 
 This rewrites `OFFLINE_PUBLIC_HOST`, `OFFLINE_HTTP_PORT` and `RELAY_URL` in
@@ -141,40 +156,76 @@ This rewrites `OFFLINE_PUBLIC_HOST`, `OFFLINE_HTTP_PORT` and `RELAY_URL` in
    tenant-scoped row hangs off `communities.id`, the data follows the address.
 
 `install.sh --host/--port` delegates to `set-address.sh`, so either entry point
-is safe.
+is safe. With TLS on, a host change re-issues the leaf certificate automatically
+when the SAN no longer matches (`make-ca.sh` reuses the existing CA, so client
+trust is unaffected).
 
-## Upgrading
+## Upgrading (one step)
 
 ```bash
-# drop the new release assets into ./images, then
-./scripts/install.sh --host <same-as-before>
+# carry the new release archive + its .sha256 to the server, then:
+sudo <설치경로>/offline/scripts/upgrade.sh --bundle buzz-offline-<arch>-<release>.tar.gz
 ```
 
-Existing secrets and volumes are preserved; only the image tags and
-`OFFLINE_RELEASE` move. `--force` regenerates `.env` and is destructive: it
-changes the relay identity.
+`upgrade.sh` verifies the sha256, extracts the new bundle next to the current
+install, copies the existing `.env` **and `certs/`** (private CA) into it, and
+re-runs the new `install.sh` without `--force`: relay identity, secrets, data
+volumes and the CA all survive; only the image tags and `OFFLINE_RELEASE` move.
+The old directory is kept until you delete it. `--force` on `install.sh`
+regenerates `.env` and is destructive: it changes the relay identity.
 
-## Why no Caddy
+## TLS and certificates
 
-Caddy in the upstream compose bundle exists to terminate TLS and get a Let's
-Encrypt certificate. With `http://` there is nothing to terminate: the relay
-already serves the app and the WebSocket on the same origin, so publishing port
-80 straight to the relay is the whole deployment. Add a proxy only if you
-later want a domain and HTTPS (`wss://`) — that is a separate decision, and
-`RELAY_URL` plus `OFFLINE_HTTP_PORT` are the knobs it needs.
+Buzz desktop 1.0.0 accepts only `wss://`/`https://` for a community address, so
+the bundle terminates TLS with **caddy** (started under the `tls` compose
+profile when `OFFLINE_TLS=1`, the default) and a **private CA** — no public
+domain, DNS or Let's Encrypt needed on a company server:
 
-### What plain HTTP costs you
+```bash
+sudo ./scripts/make-ca.sh --host <server-ip> --port 40009   # once; install.sh runs it too
+```
 
-Everything Nostr-native works: identity, signing, NIP-42 auth, relay traffic,
-media, git over HTTP. What breaks is browser **secure-context** surface in the
-web UI served over `http://`:
+- `certs/ca.crt` + `ca.key` — the CA (10y). `ca.key` never leaves the server;
+  `ca.crt` is public and is what clients install.
+- `certs/server.crt` + `server.key` — the leaf (825d) with SAN = the exact host
+  clients type (`IP:` for an IP, `DNS:` for a name; the port is not in the cert).
+- Server side: compose mounts `offline/certs` read-only into caddy (`Caddyfile`,
+  `tls /certs/server.crt /certs/server.key` — no ACME).
+- Client side (once per machine; the app verifies wss with the OS root store):
+  - **Windows:** copy `ca.crt` + `certs/install-ca.bat` to the PC, right-click →
+    *Run as administrator* (runs `certutil -addstore -f Root ca.crt`).
+    `uninstall-ca.bat` removes it again.
+  - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.crt`
+  - Linux: `sudo cp ca.crt /usr/local/share/ca-certificates/buzz-offline-ca.crt && sudo update-ca-certificates`
+- Then in the app: **Add community → `wss://<server-ip>:40009`**.
+- `verify.sh` checks the chain (`openssl verify -CAfile certs/ca.crt`) and the
+  SAN (`openssl x509 -checkhost`), plus a live TLS handshake on the published port.
+
+Details: [certs/README.md](certs/README.md).
+
+## Why the CA is not on the GitHub release
+
+The client never downloads certificates from the network; it only uses the OS
+trust store. The CA is therefore **issued on the relay server**
+(`make-ca.sh`) and `ca.crt` is distributed by hand to each client PC (the
+bundle ships only `install-ca.bat`/`uninstall-ca.bat`/`README.md` — never
+`ca.key`). Uploading `ca.crt` to the release page is optional convenience only;
+nothing depends on it.
+
+## Plain HTTP (legacy, `ws://`) — what it costs
+
+`install.sh --no-tls` publishes the relay's port directly and sets
+`RELAY_URL=ws://…`. Everything Nostr-native works: identity, signing, NIP-42
+auth, relay traffic, media, git over HTTP. What breaks is browser
+**secure-context** surface in the web UI served over `http://`:
 
 - microphone/camera (huddle audio, media capture) is blocked by the browser
 - service worker / PWA install, `navigator.clipboard`, WebCrypto in some paths
 - mobile push (off by default here anyway)
 
-The desktop app is not affected by those browser rules, so the recommended
-client for an HTTP deployment is the desktop build pointed at `ws://<host>`.
+More importantly, **desktop 1.0.0 rejects `ws://` outright** ("Enter a community
+address or invite link."), so plain HTTP is only for older clients. The TLS
+default above is the supported path.
 
 ## Backup and restore
 
