@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # Back up everything that cannot be regenerated: the database, the git data
-# volume, the object-store blobs (optional, can be large) and .env.
+# volume, the object-store blobs (optional, can be large), .env and certs/.
 #
 #   scripts/backup.sh [--with-media] [outdir]
 #
@@ -37,6 +37,14 @@ docker compose -f "$COMPOSE" exec -T postgres pg_dumpall -U "${POSTGRES_USER:-bu
 say "secrets -> $OUTDIR/env.backup"
 cp "$OFFLINE_DIR/.env" "$OUTDIR/env.backup"
 chmod 600 "$OUTDIR/env.backup"
+
+# TLS material: the private CA (ca.key is SECRET - keep this backup safe) and
+# the leaf. Without them an upgrade or rebuild breaks every client's trust.
+if [ -d "$OFFLINE_DIR/certs" ]; then
+  say "certificates -> $OUTDIR/certs.tar.gz"
+  tar -czf "$OUTDIR/certs.tar.gz" -C "$OFFLINE_DIR" certs
+  chmod 600 "$OUTDIR/certs.tar.gz"
+fi
 
 say "git data volume -> $OUTDIR/git-data.tar.gz"
 git_container=$(docker compose -f "$COMPOSE" ps -q relay)

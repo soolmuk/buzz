@@ -106,15 +106,17 @@ jobs:
           cp "$LOCK_PATH" "$work/lock.json"
 
           # The relay ref follows the requested upstream tag; the dependency
-          # refs come from the lock as-is.
+          # and TLS-profile refs come from the lock as-is.
           jq --arg tag "$UPSTREAM_TAG" \
             '.upstream_tag = $tag
              | .images |= map(if .name == "relay"
                  then .ref = ("ghcr.io/block/buzz:" + $tag)
                  else . end)' "$work/lock.json" >"$work/lock.refs.json"
 
-          images=$(
-            jq -c '.images[] | {name, ref}' "$work/lock.refs.json" |
+          resolve_section() {
+            # $1 = lock section holding the images to pin ("images", "tls")
+            local section="$1"
+            jq -c --arg s "$section" '(.[$s] // [])[] | {name, ref}' "$work/lock.refs.json" |
               while IFS= read -r entry; do
                 name=$(jq -r .name <<<"$entry")
                 ref=$(jq -r .ref <<<"$entry")
@@ -122,26 +124,30 @@ jobs:
                 [ -n "$digest" ] && [ "$digest" != "null" ] || { echo "::error::cannot resolve $ref"; exit 1; }
                 jq -n --arg name "$name" --arg ref "$ref" --arg digest "$digest" \
                   '{name: $name, ref: $ref, digest: $digest}'
-              done | jq -s '.'
-          )
+              done | jq -s --arg s "$section" '{($s): .}'
+          }
 
-          jq --argjson images "$images" '.images = $images' "$work/lock.refs.json" >"$work/lock.new.json"
+          core=$(resolve_section images)
+          tls=$(resolve_section tls)
 
-          old=$(jq -S '[.images[] | {name, digest}]' "$work/lock.json")
-          new=$(jq -S '[.images[] | {name, digest}]' "$work/lock.new.json")
+          jq --argjson core "$core" --argjson tls "$tls" \
+            '.images = $core.images | (.tls = $tls.tls)' "$work/lock.refs.json" >"$work/lock.new.json"
+
+          old=$(jq -S '[(.images + (.tls // []))[] | {name, digest}]' "$work/lock.json")
+          new=$(jq -S '[(.images + (.tls // []))[] | {name, digest}]' "$work/lock.new.json")
           if [ "$old" = "$new" ]; then
             echo "changed=false" >>"$GITHUB_OUTPUT"
             echo "No image digest moved; nothing to publish."
           else
             echo "changed=true" >>"$GITHUB_OUTPUT"
             echo "Digests changed:"
-            diff <(jq -r '.images[] | "\(.name) \(.digest)"' "$work/lock.json") \
-                 <(jq -r '.images[] | "\(.name) \(.digest)"' "$work/lock.new.json") || true
+            diff <(jq -r '(.images + (.tls // []))[] | "\(.name) \(.digest)"' "$work/lock.json") \
+                 <(jq -r '(.images + (.tls // []))[] | "\(.name) \(.digest)"' "$work/lock.new.json") || true
           fi
 
           mkdir -p artifacts
           cp "$work/lock.new.json" artifacts/resolved-lock.json
-          jq -r '.images[] | "\(.name): \(.ref) @ \(.digest)"' artifacts/resolved-lock.json
+          jq -r '(.images + (.tls // []))[] | "\(.name): \(.ref) @ \(.digest)"' artifacts/resolved-lock.json
 
       - name: Upload resolved lock
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a  # v7.0.1
@@ -298,9 +304,9 @@ jobs:
             echo
             echo "| image | ref | digest |"
             echo "|---|---|---|"
-            jq -r '.images[] | "| \(.name) | `\(.ref)` | `\(.digest)` |"' "$LOCK_PATH"
+            jq -r '(.images + (.tls // []))[] | "| \(.name) | `\(.ref)` | `\(.digest)` |"' "$LOCK_PATH"
             echo
-            echo "Each architecture is ONE archive: the five image tarballs, the installing layer and (amd64) the Docker Engine packages it needs."
+            echo "Each architecture is ONE archive: the image tarballs (relay, postgres, redis, silo, mc, caddy), the installing layer and (amd64) the Docker Engine packages it needs."
             echo "Nothing else is required and no network is touched."
             echo
             for a in assets/*.tar.gz; do
@@ -311,10 +317,12 @@ jobs:
             echo "sha256sum -c ${archive}.tar.gz.sha256"
             echo "tar -xzf ${archive}.tar.gz && cd ${archive}"
             echo "sudo docker-debs/install.sh          # only if docker is not installed yet"
-            echo "cd offline && sudo ./scripts/install.sh --host <server-ip> --port 80"
+            echo "cd offline && sudo ./scripts/install.sh --host <server-ip> --tls-port 40009"
             echo '```'
             echo
-            echo "HTTP only: no TLS, no reverse proxy. Clients use \`http://<host>\` and \`ws://<host>\`."
+            echo "TLS by default: caddy terminates wss/https on port 40009 with a private-CA certificate issued on the server (\`offline/scripts/make-ca.sh\` — no public domain needed). Clients use \`wss://<host>:40009\` (Buzz desktop 1.0.0 accepts only wss/https). Trust the CA once per client PC: copy \`offline/certs/ca.crt\` + \`install-ca.bat\` over and run the .bat as Administrator. Upgrade an existing install in one step: \`sudo ./scripts/upgrade.sh --bundle <new-archive>.tar.gz\`."
+            echo
+            echo "Legacy plain HTTP (\`ws://\`) stays available via \`install.sh --no-tls\`."
           } >/tmp/release-notes.md
 
           gh release create "$BUNDLE" \

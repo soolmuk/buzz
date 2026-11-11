@@ -77,3 +77,7 @@ deploy/charts/*/charts/*.tgz
 /offline/images/
 /offline/dist/
 /offline/backups/
+# TLS material generated on the server by scripts/make-ca.sh (ca.key is secret)
+/offline/certs/ca.*
+/offline/certs/server.*
+/offline/certs/*.srl
