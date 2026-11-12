@@ -1,0 +1,128 @@
+name: nsec-keygen release
+
+# Builds the single-file Windows GUI nsec generator (tools/nsec-keygen) and
+# publishes it as a SEPARATE GitHub release, independent of the offline bundle.
+#
+#   workflow_dispatch: pick a version (e.g. 0.1.0) -> tag `nsec-keygen-v<ver>`
+#                      is created with assets: nsec-keygen.exe + .sha256
+#
+# The produced exe is a standalone Win32 binary (raw windows-sys, no GUI
+# framework) that asks for a name, generates a fresh Nostr key pair and
+# writes a <name>.key.txt backup next to itself. `--self-test` runs the same
+# pipeline headless (exit 0/1) and is what CI executes before publishing.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Version override. Empty uses nsec-keygen-VERSION.txt"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "tools/nsec-keygen/**"
+      - ".github/workflows/nsec-keygen-release.yml"
+      - "nsec-keygen-VERSION.txt"
+      - "Cargo.toml"
+      - "Cargo.lock"
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  VERSION_FILE: nsec-keygen-VERSION.txt
+
+jobs:
+  test:
+    name: Unit tests (linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test -p nsec-keygen
+
+  build:
+    name: Build Windows exe + self-test
+    needs: test
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+      - name: cargo build --release
+        run: cargo build --release -p nsec-keygen
+      - name: Headless self-test (generate + roundtrip + file write)
+        run: |
+          $exe = "target\release\nsec-keygen.exe"
+          & $exe --self-test
+          if ($LASTEXITCODE -ne 0) { throw "self-test failed" }
+      - name: Stage assets + sha256
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path assets | Out-Null
+          Copy-Item target\release\nsec-keygen.exe assets\nsec-keygen.exe
+          $h = (Get-FileHash assets\nsec-keygen.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  nsec-keygen.exe" | Out-File -Encoding ascii assets\nsec-keygen.exe.sha256
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nsec-keygen-windows
+          path: assets/*
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          if [ -z "$V" ]; then V="$(tr -d '[:space:]' < "$VERSION_FILE")"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=nsec-keygen-v$V" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        with:
+          name: nsec-keygen-windows
+          path: assets
+      - name: Create release ${{ steps.ver.outputs.tag }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VER: ${{ steps.ver.outputs.version }}
+        run: |
+          set -euo pipefail
+          cat >/tmp/notes.md <<EOF
+          # nsec-keygen ${TAG}
+
+          Single-file Windows GUI tool that generates a fresh Nostr identity
+          (nsec/npub) for the offline Buzz relay and writes a `<name>.key.txt`
+          backup file next to the exe.
+
+          ## Usage
+          1. Run `nsec-keygen.exe` (double-click).
+          2. Type a name, click **키 생성 & 파일 저장**.
+          3. A `<name>.key.txt` file appears next to the exe — keep it secret.
+          4. In Buzz desktop 1.0.0: Other options → Join a community → enter
+             `wss://<server>:40009` → "Use an existing key" → paste the `nsec:`
+             line from that file.
+
+          `--self-test` runs the generation pipeline headless (exit 0 on OK)
+          and is what CI ran before publishing.
+
+          Verify the download: `certutil -hashfile nsec-keygen.exe SHA256`
+          and compare with `nsec-keygen.exe.sha256`.
+          EOF
+          gh release create "$TAG" \
+            --title "nsec-keygen ${TAG}" \
+            --notes-file /tmp/notes.md \
+            assets/*
