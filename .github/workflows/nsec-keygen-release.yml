@@ -15,13 +15,22 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Version without the leading v (e.g. 0.1.0)"
-        required: true
-        default: "0.1.0"
+        description: "Version override. Empty uses nsec-keygen-VERSION.txt"
+        required: false
+        default: ""
+  push:
+    branches: [main]
+    paths:
+      - "tools/nsec-keygen/**"
+      - ".github/workflows/nsec-keygen-release.yml"
+      - "nsec-keygen-VERSION.txt"
+      - "Cargo.toml"
+      - "Cargo.lock"
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
+  VERSION_FILE: nsec-keygen-VERSION.txt
 
 jobs:
   test:
@@ -68,20 +77,32 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write
+    outputs:
+      tag: ${{ steps.ver.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
+      - name: Resolve version
+        id: ver
+        shell: bash
+        run: |
+          set -euo pipefail
+          V="${{ inputs.version }}"
+          if [ -z "$V" ]; then V="$(tr -d '[:space:]' < "$VERSION_FILE")"; fi
+          echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "tag=nsec-keygen-v$V" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
         with:
           name: nsec-keygen-windows
           path: assets
-      - name: Create release nsec-keygen-v${{ inputs.version }}
+      - name: Create release ${{ steps.ver.outputs.tag }}
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: nsec-keygen-v${{ inputs.version }}
+          TAG: ${{ steps.ver.outputs.tag }}
+          VER: ${{ steps.ver.outputs.version }}
         run: |
           set -euo pipefail
-          cat >/tmp/notes.md <<'EOF'
-          # nsec-keygen v${{ inputs.version }}
+          cat >/tmp/notes.md <<EOF
+          # nsec-keygen ${TAG}
 
           Single-file Windows GUI tool that generates a fresh Nostr identity
           (nsec/npub) for the offline Buzz relay and writes a `<name>.key.txt`
