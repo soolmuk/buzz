@@ -1,0 +1,38 @@
+[package]
+name = "nsec-keygen"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.88.0"
+license = "Apache-2.0"
+description = "Offline GUI tool that generates a Nostr private key (nsec1) per name and writes it to a backup file. No network access."
+publish = false
+
+[dependencies]
+nostr = { version = "0.44" }
+bech32 = "0.11"
+rand = "0.8"
+
+[target.'cfg(windows)'.dependencies]
+# GUI: egui/eframe via iced is heavy; we use a minimal native Win32 GUI through `windows-sys`
+# to keep the single-file footprint small and the build offline-friendly.
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Controls",
+    "Win32_UI_Shell",
+    "Win32_Graphics_Gdi",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Com",
+    "Win32_System_Ole",
+    "Win32_System_Memory",
+] }
+rfd = { version = "0.15", default-features = false }
+
+[features]
+default = []
+# Headless self-test / smoke mode for CI: `nsec-keygen --self-test` runs the
+# generation pipeline without opening a window and prints the derived keys.
+self-test = []
+
+# NOTE: release profile lives at the workspace root; this package is built
+# offline-friendly with the workspace defaults.
