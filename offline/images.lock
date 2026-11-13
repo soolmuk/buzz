@@ -1,24 +1,24 @@
 {
   "schema": 1,
-  "bundle": "offline-2026.11.11-0839",
+  "bundle": "offline-2026.11.13-0326",
   "upstream_tag": "main",
-  "generated_at": "2026-11-11T08:42:04Z",
+  "generated_at": "2026-11-13T03:29:44Z",
   "notes": "Pinned image digests for the offline bundle. The offline-bundle workflow rewrites this file when any digest moves; packaging pulls by digest so a tag move cannot change a bundle silently. The 'tls' section lists edge components that are bundled but only started under the 'tls' compose profile (when OFFLINE_TLS=1).",
   "images": [
     {
       "name": "relay",
       "ref": "ghcr.io/block/buzz:main",
-      "digest": "sha256:690016ca465e439e2c58213fdfe8a094073ddbe80de75baec74b0a39de54ab38"
+      "digest": "sha256:bc5645dfcc55f0f59d08922f29f76f70b561109c2570097b5b85e677c65f20bc"
     },
     {
       "name": "postgres",
       "ref": "postgres:17-alpine",
-      "digest": "sha256:3540c0362c809df084ffac0ae69fe794515f9de92692f02178bcdce0ef0302ac"
+      "digest": "sha256:d3244e8ce3f165ee3c93d9c4a4b1d0fe48b3a89e2287b717fdcbbde92d405065"
     },
     {
       "name": "redis",
       "ref": "redis:7-alpine",
-      "digest": "sha256:7b1753b4c5ad8458906c272a8132b8c15f5557b000379eb115fb239706a384b7"
+      "digest": "sha256:7f7d30b7fdd09467bac58198a1f166dd69789d348d4fe859cccb20e0cf287fbe"
     },
     {
       "name": "silo",
