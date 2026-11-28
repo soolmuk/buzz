@@ -1,14 +1,14 @@
 {
   "schema": 1,
-  "bundle": "offline-2026.11.25-0328",
+  "bundle": "offline-2026.11.28-0325",
   "upstream_tag": "main",
-  "generated_at": "2026-11-25T03:31:59Z",
+  "generated_at": "2026-11-28T03:29:03Z",
   "notes": "Pinned image digests for the offline bundle. The offline-bundle workflow rewrites this file when any digest moves; packaging pulls by digest so a tag move cannot change a bundle silently. The 'tls' section lists edge components that are bundled but only started under the 'tls' compose profile (when OFFLINE_TLS=1).",
   "images": [
     {
       "name": "relay",
       "ref": "ghcr.io/block/buzz:main",
-      "digest": "sha256:806033b311e6ffe2fafae732fbde826308c63cb79114fe0a4fda485b93054972"
+      "digest": "sha256:7edcf85bd33ba2bfb6f1203db321393541b7d8c6a0794aa85f7814b910f383de"
     },
     {
       "name": "postgres",
